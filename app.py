@@ -2,11 +2,15 @@ import os
 import psycopg2
 from flask import Flask, request, jsonify
 from werkzeug.security import generate_password_hash, check_password_hash
+from cryptography.fernet import Fernet
 
 app = Flask(__name__)
 
-# خواندن آدرس دیتابیس از متغیرهای محیطی که در Render تنظیم می‌کنیم
+# --- بخش امنیتی: خواندن کلیدهای مخفی از متغیرهای محیطی ---
 DATABASE_URL = os.environ.get('DATABASE_URL')
+# یک کلید برای رمزنگاری داده‌ها. این کلید را در Render تنظیم خواهیم کرد.
+SECRET_KEY = os.environ.get('SECRET_KEY')
+cipher_suite = Fernet(SECRET_KEY.encode())
 
 def get_db_connection():
     """یک اتصال جدید به دیتابیس برقرار می‌کند."""
@@ -17,49 +21,46 @@ def init_db():
     """جداول مورد نیاز را در دیتابیس می‌سازد."""
     conn = get_db_connection()
     cur = conn.cursor()
-    # ساخت جدول کاربران
     cur.execute('''CREATE TABLE IF NOT EXISTS users (
                     username TEXT PRIMARY KEY,
                     password_hash TEXT NOT NULL
                 )''')
-    # ساخت جدول رمزها
+    # نوع ستون‌های username و password به BYTEA تغییر کرده تا داده رمزنگاری شده را ذخیره کند
     cur.execute('''CREATE TABLE IF NOT EXISTS passwords (
                     id SERIAL PRIMARY KEY,
                     owner TEXT NOT NULL REFERENCES users(username),
-                    website TEXT NOT NULL,
-                    username TEXT NOT NULL,
-                    password TEXT NOT NULL
+                    website BYTEA NOT NULL,
+                    username BYTEA NOT NULL,
+                    password BYTEA NOT NULL
                 )''')
     conn.commit()
     cur.close()
     conn.close()
     print("Tables initialized successfully.")
 
-# این تابع را یک بار در ابتدای برنامه اجرا می‌کنیم
 init_db()
 
 @app.route('/')
 def home():
-    return "PassGuard Server is live and connected to the permanent database!"
+    return "PassGuard Server is live and secure!"
 
+# (مسیرهای register و login بدون تغییر باقی می‌مانند)
 @app.route('/register', methods=['POST'])
 def register():
     data = request.get_json()
     username = data.get('username')
     password = data.get('password')
     if not username or not password:
-        return jsonify({"error": "Missing username or password"}), 400
-    
+        return jsonify({"error": "Missing data"}), 400
     password_hash = generate_password_hash(password)
-    
     conn = get_db_connection()
     cur = conn.cursor()
     try:
         cur.execute("INSERT INTO users (username, password_hash) VALUES (%s, %s)", (username, password_hash))
         conn.commit()
-        return jsonify({"message": "User created successfully"}), 21
+        return jsonify({"message": "User created successfully"}), 201
     except psycopg2.IntegrityError:
-        conn.rollback() # برگرداندن تغییرات در صورت خطا
+        conn.rollback()
         return jsonify({"error": "Username already exists"}), 400
     finally:
         cur.close()
@@ -71,20 +72,19 @@ def login():
     username = data.get('username')
     password = data.get('password')
     if not username or not password:
-        return jsonify({"error": "Missing username or password"}), 400
-
+        return jsonify({"error": "Missing data"}), 400
     conn = get_db_connection()
     cur = conn.cursor()
     cur.execute("SELECT password_hash FROM users WHERE username = %s", (username,))
     user_data = cur.fetchone()
     cur.close()
     conn.close()
-    
     if user_data and check_password_hash(user_data[0], password):
         return jsonify({"message": "Login successful"})
     else:
         return jsonify({"error": "Invalid username or password"}), 401
 
+# --- مسیر اضافه کردن رمز (با رمزنگاری) ---
 @app.route('/add_password', methods=['POST'])
 def add_password():
     data = request.get_json()
@@ -95,15 +95,21 @@ def add_password():
     if not all([owner, website, username, password]):
         return jsonify({"error": "Missing data"}), 400
     
+    # رمزنگاری داده‌ها قبل از ذخیره
+    encrypted_website = cipher_suite.encrypt(website.encode())
+    encrypted_username = cipher_suite.encrypt(username.encode())
+    encrypted_password = cipher_suite.encrypt(password.encode())
+    
     conn = get_db_connection()
     cur = conn.cursor()
     cur.execute("INSERT INTO passwords (owner, website, username, password) VALUES (%s, %s, %s, %s)",
-                (owner, website, username, password))
+                (owner, encrypted_website, encrypted_username, encrypted_password))
     conn.commit()
     cur.close()
     conn.close()
     return jsonify({"message": "Password added successfully"}), 201
 
+# --- مسیر گرفتن لیست رمزها (با رمزگشایی) ---
 @app.route('/get_passwords', methods=['GET'])
 def get_passwords():
     owner = request.args.get('owner')
@@ -117,7 +123,48 @@ def get_passwords():
     cur.close()
     conn.close()
     
-    pass_list = [{"id": row[0], "website": row[1], "username": row[2], "password": row[3]} for row in passwords]
+    pass_list = []
+    for row in passwords:
+        # رمزگشایی داده‌ها قبل از ارسال به کلاینت
+        pass_list.append({
+            "id": row[0],
+            "website": cipher_suite.decrypt(row[1]).decode(),
+            "username": cipher_suite.decrypt(row[2]).decode(),
+            "password": cipher_suite.decrypt(row[3]).decode()
+        })
     return jsonify(pass_list)
 
-# (دیگر به if __name__ == '__main__': نیازی نیست چون Gunicorn برنامه را اجرا می‌کند)
+# --- مسیر جدید برای ویرایش رمز ---
+@app.route('/edit_password', methods=['POST'])
+def edit_password():
+    data = request.get_json()
+    p_id = data.get('id')
+    website = data.get('website')
+    username = data.get('username')
+    password = data.get('password')
+
+    encrypted_website = cipher_suite.encrypt(website.encode())
+    encrypted_username = cipher_suite.encrypt(username.encode())
+    encrypted_password = cipher_suite.encrypt(password.encode())
+
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("UPDATE passwords SET website = %s, username = %s, password = %s WHERE id = %s",
+                (encrypted_website, encrypted_username, encrypted_password, p_id))
+    conn.commit()
+    cur.close()
+    conn.close()
+    return jsonify({"message": "Password updated successfully"})
+
+# --- مسیر جدید برای حذف رمز ---
+@app.route('/delete_password', methods=['POST'])
+def delete_password():
+    data = request.get_json()
+    p_id = data.get('id')
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM passwords WHERE id = %s", (p_id,))
+    conn.commit()
+    cur.close()
+    conn.close()
+    return jsonify({"message": "Password deleted successfully"})
