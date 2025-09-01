@@ -20,12 +20,10 @@ def init_db():
     """جداول مورد نیاز را در دیتابیس می‌سازد."""
     conn = get_db_connection()
     cur = conn.cursor()
-    # ساخت جدول کاربران
     cur.execute('''CREATE TABLE IF NOT EXISTS users (
                     username TEXT PRIMARY KEY,
                     password_hash TEXT NOT NULL
                 )''')
-    # ساخت جدول رمزها (با نوع ستون صحیح)
     cur.execute('''CREATE TABLE IF NOT EXISTS passwords (
                     id SERIAL PRIMARY KEY,
                     owner TEXT NOT NULL REFERENCES users(username),
@@ -51,9 +49,7 @@ def register():
     password = data.get('password')
     if not username or not password:
         return jsonify({"error": "Missing data"}), 400
-    
     password_hash = generate_password_hash(password)
-    
     conn = get_db_connection()
     cur = conn.cursor()
     try:
@@ -74,14 +70,12 @@ def login():
     password = data.get('password')
     if not username or not password:
         return jsonify({"error": "Missing data"}), 400
-
     conn = get_db_connection()
     cur = conn.cursor()
     cur.execute("SELECT password_hash FROM users WHERE username = %s", (username,))
     user_data = cur.fetchone()
     cur.close()
     conn.close()
-    
     if user_data and check_password_hash(user_data[0], password):
         return jsonify({"message": "Login successful"})
     else:
@@ -96,11 +90,9 @@ def add_password():
     password = data.get('password')
     if not all([owner, website, username, password]):
         return jsonify({"error": "Missing data"}), 400
-    
     encrypted_website = cipher_suite.encrypt(website.encode())
     encrypted_username = cipher_suite.encrypt(username.encode())
     encrypted_password = cipher_suite.encrypt(password.encode())
-    
     conn = get_db_connection()
     cur = conn.cursor()
     cur.execute("INSERT INTO passwords (owner, website, username, password) VALUES (%s, %s, %s, %s)",
@@ -115,22 +107,13 @@ def get_passwords():
     owner = request.args.get('owner')
     if not owner:
         return jsonify({"error": "Owner username is required"}), 400
-
     conn = get_db_connection()
     cur = conn.cursor()
     cur.execute("SELECT id, website, username, password FROM passwords WHERE owner = %s", (owner,))
     passwords = cur.fetchall()
     cur.close()
     conn.close()
-    
-    pass_list = []
-    for row in passwords:
-        pass_list.append({
-            "id": row[0],
-            "website": cipher_suite.decrypt(row[1]).decode(),
-            "username": cipher_suite.decrypt(row[2]).decode(),
-            "password": cipher_suite.decrypt(row[3]).decode()
-        })
+    pass_list = [{"id": row[0], "website": cipher_suite.decrypt(row[1]).decode(), "username": cipher_suite.decrypt(row[2]).decode(), "password": cipher_suite.decrypt(row[3]).decode()} for row in passwords]
     return jsonify(pass_list)
 
 @app.route('/edit_password', methods=['POST'])
@@ -140,11 +123,9 @@ def edit_password():
     website = data.get('website')
     username = data.get('username')
     password = data.get('password')
-
     encrypted_website = cipher_suite.encrypt(website.encode())
     encrypted_username = cipher_suite.encrypt(username.encode())
     encrypted_password = cipher_suite.encrypt(password.encode())
-
     conn = get_db_connection()
     cur = conn.cursor()
     cur.execute("UPDATE passwords SET website = %s, username = %s, password = %s WHERE id = %s",
